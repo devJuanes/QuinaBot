@@ -2,12 +2,22 @@ import ccxt
 import pandas as pd
 import pandas_ta as ta
 import asyncio
+from paper_trading import PaperTrading
 from datetime import datetime
 
 class QuinaBot:
     def __init__(self, symbol='BTC/USDT', timeframe='1m'):
         self.symbol = symbol
         self.timeframe = timeframe
+        
+        # Configuration (can be updated dynamically)
+        self.config = {
+            'rsi_buy_threshold': 35,
+            'rsi_sell_threshold': 65,
+            'sl_multiplier': 1.0,
+            'tp_multiplier': 1.5
+        }
+        
         # 1. Futures Exchange (Default)
         self.exchange = ccxt.binance({
             'enableRateLimit': True,
@@ -25,6 +35,17 @@ class QuinaBot:
         self.signal_reason = "Iniciando conexión..."
         self.is_running = False
         self.use_spot = False # Flag to switch exchange
+        
+        # Paper Trading
+        self.paper_trading = PaperTrading()
+    
+    def update_config(self, new_config):
+        """Update strategy configuration dynamically"""
+        self.config['rsi_buy_threshold'] = new_config.get('rsiBuyThreshold', 35)
+        self.config['rsi_sell_threshold'] = new_config.get('rsiSellThreshold', 65)
+        self.config['sl_multiplier'] = new_config.get('slMultiplier', 1.0)
+        self.config['tp_multiplier'] = new_config.get('tpMultiplier', 1.5)
+        print(f"✅ Config updated: {self.config}")
 
     async def set_symbol(self, new_symbol):
         print(f"Switching market to: {new_symbol}")
@@ -131,22 +152,24 @@ class QuinaBot:
             # Default "Waiting" message with live stats
             reason = f"{trend_str} | RSI: {int(rsi)} | Esperando setup..."
             
-            # Risk Management Config
-            sl_multiplier = 1.0
-            tp_multiplier = 1.5
+            # Get config values
+            rsi_buy = self.config['rsi_buy_threshold']
+            rsi_sell = self.config['rsi_sell_threshold']
+            sl_mult = self.config['sl_multiplier']
+            tp_mult = self.config['tp_multiplier']
             
             # PRIORITY 1: RSI EXTREMES (Check FIRST - Simple, RSI-only signals)
-            if rsi < 35:
+            if rsi < rsi_buy:
                 signal = "COMPRA"
                 reason = f"RSI Muy Bajo ({int(rsi)}) - Sobreventa"
-                stop_loss = close - (atr * 1.0)
-                take_profit = close + (atr * 1.5)
+                stop_loss = close - (atr * sl_mult)
+                take_profit = close + (atr * tp_mult)
             
-            elif rsi > 65:
+            elif rsi > rsi_sell:
                 signal = "VENTA"
                 reason = f"RSI Muy Alto ({int(rsi)}) - Sobrecompra"
-                stop_loss = close + (atr * 1.0)
-                take_profit = close - (atr * 1.5)
+                stop_loss = close + (atr * sl_mult)
+                take_profit = close - (atr * tp_mult)
             
             # PRIORITY 2: STRONG REVERSAL (Bollinger Bounce + RSI)
             elif is_uptrend and rsi < 40 and close <= bb_lower * 1.015:
@@ -215,6 +238,21 @@ class QuinaBot:
                 self.data = self.analyze_data(raw_df)
                 if not self.data.empty:
                      latest = self.data.iloc[-1]
+                     current_price = latest['close']
+                     
+                     # Paper Trading: Check if SL/TP hit
+                     self.paper_trading.check_trade(current_price)
+                     
+                     # Paper Trading: Open new trade on signal change
+                     if self.latest_signal not in ["ESPERANDO", "ESPERAR", "NEUTRAL"]:
+                         self.paper_trading.open_trade(
+                             self.latest_signal,
+                             current_price,
+                             getattr(self, 'stop_loss', 0),
+                             getattr(self, 'take_profit', 0),
+                             self.symbol
+                         )
+                     
                      print(f"[{datetime.now().strftime('%H:%M:%S')}] {self.symbol} | Price: {latest['close']:.2f} | RSI: {latest.get('RSI_14', 0):.2f} | Signal: {self.latest_signal}")
             
             # Respect rate limits for real API
@@ -244,5 +282,6 @@ class QuinaBot:
             "current_price": last['close'],
             "rsi": last.get('RSI_14', 0),
             "ema200": last.get('EMA_200', 0) if not pd.isna(last.get('EMA_200')) else None,
-            "candles": formatted_candles
+            "candles": formatted_candles,
+            "paper_trading": self.paper_trading.get_stats()
         }

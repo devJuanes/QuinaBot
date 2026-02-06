@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import asyncio
@@ -31,6 +31,13 @@ async def set_symbol(symbol: str):
     """Updates the trading pair"""
     await bot.set_symbol(symbol)
     return {"status": "ok", "symbol": symbol}
+
+@app.post("/update-config")
+async def update_config(request: Request):
+    """Updates bot strategy configuration"""
+    config = await request.json()
+    bot.update_config(config)
+    return {"status": "ok", "config": config}
 
 @app.on_event("startup")
 async def startup_event():
