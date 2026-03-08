@@ -1,0 +1,10 @@
+.env
+broker_status.json
+broker_data.json
+broker_cmd.json
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.log
