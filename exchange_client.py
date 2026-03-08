@@ -35,9 +35,11 @@ RETRY_DELAYS = [5, 10, 30]  # seconds
 MAX_RETRIES = 3
 BINANCE_COOLDOWN = 600  # 10 min: no retry Binance si todos dan 451
 
-# --- State: evita spam de logs cuando Binance está bloqueado ---
+# --- State: cooldown cuando Binance da 451 ---
 _binance_blocked_until = 0.0
-_coingecko_fallback_logged = False
+_in_cooldown_last_fetch = False
+_cooldown_entered_logged = False
+_cooldown_fallback_logged = False
 
 # --- CoinGecko symbol mapping ---
 SYMBOL_TO_COINGECKO = {
@@ -90,51 +92,38 @@ def _is_blocked_error(exc: Exception) -> bool:
     return "451" in msg or "restricted location" in msg or "service unavailable" in msg
 
 
-async def get_binance_data(
+async def _try_binance_once(
     symbol: str,
     timeframe: str,
     limit: int,
     use_spot: bool = False,
 ) -> pd.DataFrame:
     """
-    Fetch OHLCV from Binance with endpoint fallback and retry.
-    Tries api, api1, api2, api3. Retries with 5s, 10s, 30s backoff.
+    Single Binance attempt (one endpoint). Returns df or raises.
+    On 451: sets cooldown and raises.
     """
-    global _binance_blocked_until
-    last_exc = None
-    blocked_count = 0
-    for endpoint in BINANCE_ENDPOINTS:
-        exchange = _create_binance_exchange(endpoint, use_futures=not use_spot)
-        for attempt in range(MAX_RETRIES):
-            try:
-                ohlcv = await asyncio.to_thread(
-                    exchange.fetch_ohlcv, symbol, timeframe, limit=limit
-                )
-                if ohlcv:
-                    df = pd.DataFrame(
-                        ohlcv,
-                        columns=["timestamp", "open", "high", "low", "close", "volume"],
-                    )
-                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-                    host = endpoint.replace("https://", "")
-                    logger.info(f"Using {host}")
-                    return df
-            except Exception as e:
-                last_exc = e
-                if _is_blocked_error(e):
-                    blocked_count += 1
-                    if blocked_count == 1:
-                        logger.warning("Binance endpoint blocked (451). Switching endpoint...")
-                    break
-                if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(RETRY_DELAYS[attempt])
-                else:
-                    break
-
-    if last_exc and _is_blocked_error(last_exc):
-        _binance_blocked_until = time.time() + BINANCE_COOLDOWN
-    if last_exc:
-        raise last_exc
+    global _binance_blocked_until, _cooldown_entered_logged, _in_cooldown_last_fetch
+    endpoint = BINANCE_ENDPOINTS[0]
+    exchange = _create_binance_exchange(endpoint, use_futures=not use_spot)
+    try:
+        ohlcv = await asyncio.to_thread(
+            exchange.fetch_ohlcv, symbol, timeframe, limit=limit
+        )
+        if ohlcv:
+            df = pd.DataFrame(
+                ohlcv,
+                columns=["timestamp", "open", "high", "low", "close", "volume"],
+            )
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            return df
+    except Exception as e:
+        if _is_blocked_error(e):
+            _binance_blocked_until = time.time() + BINANCE_COOLDOWN
+            _in_cooldown_last_fetch = True
+            if not _cooldown_entered_logged:
+                logger.warning("Binance blocked (451). Entering cooldown for 10 minutes.")
+                _cooldown_entered_logged = True
+        raise e
     return pd.DataFrame()
 
 
@@ -204,26 +193,30 @@ async def fetch_market_data(
     Main entry point: fetch market data with graceful degradation.
     Returns (df_1m, df_15m, source) where source is "binance" or "coingecko".
     """
-    global _coingecko_fallback_logged
-    # Cooldown: si Binance dio 451 hace poco, ir directo a CoinGecko (sin spam)
-    if time.time() < _binance_blocked_until:
-        pass  # skip Binance, go to CoinGecko below
+    global _in_cooldown_last_fetch, _cooldown_fallback_logged, _cooldown_entered_logged
+    now = time.time()
+    in_cooldown = now < _binance_blocked_until
+
+    if in_cooldown:
+        _in_cooldown_last_fetch = True
+        if not _cooldown_fallback_logged:
+            logger.info("Using CoinGecko fallback during cooldown.")
+            _cooldown_fallback_logged = True
     else:
+        if _in_cooldown_last_fetch:
+            logger.info("Retrying Binance after cooldown.")
+            _in_cooldown_last_fetch = False
+            _cooldown_fallback_logged = False
+            _cooldown_entered_logged = False
         try:
             raw_1m, raw_15m = await asyncio.gather(
-                get_binance_data(symbol, timeframe_1m, limit_1m, use_spot),
-                get_binance_data(symbol, timeframe_15m, limit_15m, use_spot),
+                _try_binance_once(symbol, timeframe_1m, limit_1m, use_spot),
+                _try_binance_once(symbol, timeframe_15m, limit_15m, use_spot),
             )
             if not raw_1m.empty and not raw_15m.empty:
                 return raw_1m, raw_15m, "binance"
-        except Exception as e:
-            if not _coingecko_fallback_logged:
-                logger.warning(f"Binance unavailable: {e}")
-
-    # Fallback: CoinGecko (log solo la primera vez)
-    if not _coingecko_fallback_logged:
-        logger.warning("Binance unavailable. Using CoinGecko fallback.")
-        _coingecko_fallback_logged = True
+        except Exception:
+            pass  # cooldown already set by _try_binance_once if 451
     coin_id = SYMBOL_TO_COINGECKO.get(symbol, "bitcoin")
     cg_df = get_coingecko_ohlcv(coin_id, days=1)
     if cg_df.empty:
