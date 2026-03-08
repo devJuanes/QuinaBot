@@ -45,20 +45,20 @@ Si tu VPS está en una región donde Binance restringe el acceso, verás:
 Service unavailable from a restricted location according to 'b. Eligibility'
 ```
 
-**Solución: usar un proxy** en una región permitida (EU, Asia, etc.):
+**Solución más simple: usar Bybit** (menos restricciones geográficas):
 
 ```bash
-# Antes de ejecutar, exporta la variable (o añádela a .env y haz source)
-export HTTPS_PROXY=http://tu-proxy:puerto
-# Con autenticación: export HTTPS_PROXY=http://user:pass@proxy:puerto
+# Añade a tu .env
+echo "USE_BYBIT=1" >> .env
 
 python main.py
 ```
 
-O en `.env` (si usas python-dotenv, hay que cargarlo antes del bot):
+Verás `📊 Usando Bybit` al iniciar. Misma lógica, mismos pares (BTC/USDT, etc.).
 
-```
+**Alternativa: proxy** para seguir con Binance:
+
+```bash
+# En .env
 HTTPS_PROXY=http://proxy.ejemplo.com:3128
 ```
-
-Proveedores de proxy que suelen funcionar: Bright Data, Oxylabs, SmartProxy, o un VPS barato en EU como proxy.

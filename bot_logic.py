@@ -18,6 +18,11 @@ def _get_proxy_config():
     return None
 
 
+def _use_bybit():
+    """Bybit tiene menos restricciones geográficas que Binance. Usar si Binance da 451."""
+    return os.environ.get('USE_BYBIT', '').lower() in ('1', 'true', 'yes')
+
+
 class QuinaBot:
     def __init__(self, symbol='BTC/USDT', timeframe='1m'):
         self.symbol = symbol
@@ -38,17 +43,26 @@ class QuinaBot:
             'cooldown_seconds': 45,       # No reabrir misma dirección tras cerrar
         }
 
-        # Exchanges (proxy opcional para evitar bloqueo 451 por región)
+        # Exchanges: Bybit (menos restricciones) o Binance (proxy si 451)
         proxy = _get_proxy_config()
         common = {'enableRateLimit': True, 'trust_env': True}
         if proxy:
             common['proxies'] = proxy
             print(f"🌐 Usando proxy: {str(proxy.get('https', proxy.get('http', '')))[:60]}...")
-        self.exchange = ccxt.binance({
-            **common,
-            'options': {'defaultType': 'future'}
-        })
-        self.exchange_spot = ccxt.binance(common)
+
+        if _use_bybit():
+            print("📊 Usando Bybit (menos restricciones geográficas)")
+            self.exchange = ccxt.bybit({
+                **common,
+                'options': {'defaultType': 'linear'}
+            })
+            self.exchange_spot = ccxt.bybit(common)
+        else:
+            self.exchange = ccxt.binance({
+                **common,
+                'options': {'defaultType': 'future'}
+            })
+            self.exchange_spot = ccxt.binance(common)
 
         self.data = pd.DataFrame()
         self.trend_data = pd.DataFrame()
