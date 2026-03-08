@@ -4,9 +4,19 @@ import pandas_ta as ta
 import asyncio
 import time
 import math
+import os
 from paper_trading import PaperTrading
 from datetime import datetime
 import json
+
+
+def _get_proxy_config():
+    """Lee proxy desde HTTP_PROXY o HTTPS_PROXY. Necesario si Binance bloquea tu región (451)."""
+    proxy = os.environ.get('HTTPS_PROXY') or os.environ.get('HTTP_PROXY')
+    if proxy:
+        return {'http': proxy, 'https': proxy}
+    return None
+
 
 class QuinaBot:
     def __init__(self, symbol='BTC/USDT', timeframe='1m'):
@@ -28,12 +38,17 @@ class QuinaBot:
             'cooldown_seconds': 45,       # No reabrir misma dirección tras cerrar
         }
 
-        # Exchanges
+        # Exchanges (proxy opcional para evitar bloqueo 451 por región)
+        proxy = _get_proxy_config()
+        common = {'enableRateLimit': True, 'trust_env': True}
+        if proxy:
+            common['proxies'] = proxy
+            print(f"🌐 Usando proxy: {str(proxy.get('https', proxy.get('http', '')))[:60]}...")
         self.exchange = ccxt.binance({
-            'enableRateLimit': True,
+            **common,
             'options': {'defaultType': 'future'}
         })
-        self.exchange_spot = ccxt.binance({'enableRateLimit': True})
+        self.exchange_spot = ccxt.binance(common)
 
         self.data = pd.DataFrame()
         self.trend_data = pd.DataFrame()

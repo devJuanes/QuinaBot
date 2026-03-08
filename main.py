@@ -3,6 +3,9 @@ QuinaBot Pro API — REST API escalable para trading.
 Lista para consumo por Web (QuinaUI) y aplicación móvil Flutter.
 Versión: 3.0 | Base: /api/v1
 """
+from dotenv import load_dotenv
+load_dotenv()  # Carga .env antes de crear el bot (proxy, etc.)
+
 import sys
 import asyncio
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
