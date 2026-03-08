@@ -9,6 +9,8 @@ from paper_trading import PaperTrading
 from datetime import datetime
 import json
 
+from exchange_client import fetch_market_data, get_binance_markets
+
 
 def _get_proxy_config():
     """Lee proxy desde HTTP_PROXY o HTTPS_PROXY. Necesario si Binance bloquea tu región (451)."""
@@ -43,12 +45,11 @@ class QuinaBot:
             'cooldown_seconds': 45,       # No reabrir misma dirección tras cerrar
         }
 
-        # Exchanges: Bybit (menos restricciones) o Binance (proxy si 451)
+        # Exchanges: Bybit (menos restricciones) o Binance (via exchange_client con fallback)
         proxy = _get_proxy_config()
         common = {'enableRateLimit': True, 'trust_env': True}
         if proxy:
             common['proxies'] = proxy
-            print(f"🌐 Usando proxy: {str(proxy.get('https', proxy.get('http', '')))[:60]}...")
 
         if _use_bybit():
             print("📊 Usando Bybit (menos restricciones geográficas)")
@@ -57,12 +58,12 @@ class QuinaBot:
                 'options': {'defaultType': 'linear'}
             })
             self.exchange_spot = ccxt.bybit(common)
+            self._use_exchange_client = False
         else:
-            self.exchange = ccxt.binance({
-                **common,
-                'options': {'defaultType': 'future'}
-            })
-            self.exchange_spot = ccxt.binance(common)
+            print("📊 Usando Binance (resiliente: api1/2/3 + CoinGecko fallback)")
+            self.exchange = None
+            self.exchange_spot = None
+            self._use_exchange_client = True
 
         self.data = pd.DataFrame()
         self.trend_data = pd.DataFrame()
@@ -116,12 +117,14 @@ class QuinaBot:
         self.latest_signal = "ESPERANDO"
         self.signal_reason = f"Sincronizando {new_symbol} (MTF Mode)..."
         
+        if self._use_exchange_client:
+            self.use_spot = False
+            self.signal_reason = "Market: FUTURES (MTF Optimized) 🚀"
+            return
         try:
             if not self.exchange.markets:
                 await asyncio.to_thread(self.exchange.load_markets)
-            
             is_future = new_symbol in self.exchange.markets and self.exchange.markets[new_symbol].get('type') in ['swap', 'future', 'linear']
-            
             if is_future:
                 self.use_spot = False
                 self.signal_reason = "Market: FUTURES (MTF Optimized) 🚀"
@@ -133,6 +136,8 @@ class QuinaBot:
 
     async def get_available_markets(self):
         """Lista de mercados disponibles (Futures y Spot USDT) para selector en API/Flutter."""
+        if self._use_exchange_client:
+            return await get_binance_markets()
         try:
             await asyncio.to_thread(self.exchange.load_markets)
             await asyncio.to_thread(self.exchange_spot.load_markets)
@@ -144,7 +149,6 @@ class QuinaBot:
             for sid, m in self.exchange_spot.markets.items():
                 if m.get('quote') == 'USDT' and m.get('type') == 'spot' and m.get('active', True):
                     spot.append({"symbol": sid, "type": "spot", "base": m.get('base'), "quote": "USDT"})
-            # Eliminar duplicados por symbol (futures suelen ser los que usamos)
             seen = set()
             combined = []
             for x in futures[:50]:
@@ -162,6 +166,8 @@ class QuinaBot:
 
     async def get_recommended_market(self):
         """Mercado recomendado para operar: mayor volumen 24h y liquidez (el favorito del sistema)."""
+        if self._use_exchange_client:
+            return {"recommended": "BTC/USDT", "reason": "Default (modo resiliente)", "alternatives": ["ETH/USDT", "SOL/USDT"]}
         try:
             await asyncio.to_thread(self.exchange.load_markets)
             tickers = await asyncio.to_thread(self.exchange.fetch_tickers)
@@ -170,7 +176,6 @@ class QuinaBot:
                 if sid.endswith("/USDT") and sid in self.exchange.markets
                 and self.exchange.markets[sid].get("type") in ("future", "swap", "linear")
             ]
-            # Ordenar por volumen quote (USDT) descendente
             with_vol = []
             for sid, t in usdt_pairs:
                 quote_vol = float(t.get("quoteVolume") or 0)
@@ -182,7 +187,6 @@ class QuinaBot:
                     "change_24h": float(t.get("percentage", 0) or 0),
                 })
             with_vol.sort(key=lambda x: x["volume_24h"], reverse=True)
-            # Los más líquidos y estables: top 5 por volumen, preferir no extremadamente volátiles
             top = with_vol[:10]
             recommended = top[0] if top else {"symbol": "BTC/USDT", "volume_24h": 0, "change_24h": 0}
             return {
@@ -195,13 +199,11 @@ class QuinaBot:
             return {"recommended": "BTC/USDT", "reason": "Default (BTC más líquido)", "alternatives": ["ETH/USDT", "SOL/USDT"]}
 
     async def fetch_candles(self, timeframe, limit=300):
+        """Fetch candles (solo para Bybit). Binance usa fetch_market_data en start_loop."""
         try:
             active_exchange = self.exchange_spot if self.use_spot else self.exchange
             ohlcv = await asyncio.to_thread(
-                active_exchange.fetch_ohlcv, 
-                self.symbol, 
-                timeframe, 
-                limit=limit
+                active_exchange.fetch_ohlcv, self.symbol, timeframe, limit=limit
             )
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -392,12 +394,26 @@ class QuinaBot:
         self.is_running = True
         print(f"🔥 QuinaBot ALPHA v3.0 (Real-Money Ready) | {self.symbol}")
         while self.is_running:
-            # Parallel Fetch (1m and 15m)
-            raw_1m, raw_15m = await asyncio.gather(
-                self.fetch_candles('1m', 300),
-                self.fetch_candles('15m', 200)
-            )
-            
+            try:
+                if self._use_exchange_client:
+                    raw_1m, raw_15m, source = await fetch_market_data(
+                        self.symbol,
+                        limit_1m=300,
+                        limit_15m=200,
+                        use_spot=self.use_spot,
+                    )
+                    if source == "coingecko":
+                        self.signal_reason = "Modo degradado (CoinGecko fallback)"
+                else:
+                    raw_1m, raw_15m = await asyncio.gather(
+                        self.fetch_candles('1m', 300),
+                        self.fetch_candles('15m', 200),
+                    )
+            except Exception as e:
+                print(f"[WARN] Fetch cycle failed: {e}. Retrying in 5s...")
+                await asyncio.sleep(5)
+                continue
+
             if not raw_1m.empty and not raw_15m.empty:
                 self.data = self.analyze_data(raw_1m)
                 self.trend_data = self.analyze_data(raw_15m)
@@ -421,7 +437,9 @@ class QuinaBot:
                     ts = datetime.now().strftime('%H:%M:%S')
                     trend_ema = self.trend_data.iloc[-1].get('EMA_200', 0) if not self.trend_data.empty else 0
                     print(f"[{ts}] {self.symbol} | Price: {price:.2f} | MTF: {'UP' if price > trend_ema else 'DOWN'} | Signal: {self.latest_signal} | Strength: {self.signal_strength}")
-            
+            else:
+                await asyncio.sleep(5)
+
             await asyncio.sleep(2)
 
     def get_latest_data(self):

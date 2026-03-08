@@ -1,5 +1,6 @@
 ccxt
 pandas
+requests
 pandas_ta
 fastapi
 uvicorn

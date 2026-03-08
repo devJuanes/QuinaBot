@@ -45,20 +45,15 @@ Si tu VPS está en una región donde Binance restringe el acceso, verás:
 Service unavailable from a restricted location according to 'b. Eligibility'
 ```
 
-**Solución más simple: usar Bybit** (menos restricciones geográficas):
+**El bot ahora es resiliente por defecto** (sin configurar nada):
 
-```bash
-# Añade a tu .env
-echo "USE_BYBIT=1" >> .env
+1. **Fallback de endpoints**: Prueba api.binance.com → api1 → api2 → api3
+2. **Retry con backoff**: 5s, 10s, 30s entre reintentos
+3. **CoinGecko fallback**: Si Binance falla, usa CoinGecko para precio (modo degradado)
 
-python main.py
-```
+Verás `[WARN] Binance unavailable. Using CoinGecko fallback.` si activa el fallback.
 
-Verás `📊 Usando Bybit` al iniciar. Misma lógica, mismos pares (BTC/USDT, etc.).
+**Alternativas**:
 
-**Alternativa: proxy** para seguir con Binance:
-
-```bash
-# En .env
-HTTPS_PROXY=http://proxy.ejemplo.com:3128
-```
+- **USE_BYBIT=1** en .env → Usa Bybit (menos restricciones)
+- **HTTPS_PROXY** en .env → Proxy para Binance
